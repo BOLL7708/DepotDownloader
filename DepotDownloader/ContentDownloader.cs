@@ -5,10 +5,11 @@ using System;
 using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Data.SqlTypes;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Reflection;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -866,8 +867,13 @@ namespace DepotDownloader
 
             if (Config.DownloadManifestOnly)
             {
-                DumpManifestToTextFile(depot, newManifest, Config.OutputJson);
+                DumpManifestToTextFile(depot, newManifest);
                 return null;
+            }
+
+            if (Config.WriteManifestJson)
+            {
+                DumpManifestToJsonFile(depot, newManifest);
             }
 
             var stagingDir = Path.Combine(depot.InstallDir, STAGING_DIR);
@@ -1354,16 +1360,50 @@ namespace DepotDownloader
             }
         }
 
-        static void DumpManifestToTextFile(DepotDownloadInfo depot, DepotManifest manifest, bool asJson)
+
+
+        static void DumpManifestToTextFile(DepotDownloadInfo depot, DepotManifest manifest)
         {
-            var outputFileExtension = asJson ? "json" : "txt";
-            var txtManifest = Path.Combine(depot.InstallDir, $"manifest_{depot.DepotId}_{depot.ManifestId}.{outputFileExtension}");
+            var txtManifest = Path.Combine(depot.InstallDir, $"manifest_{depot.DepotId}_{depot.ManifestId}.txt");
             using var sw = new StreamWriter(txtManifest);
 
-            var manifestFiles = manifest.Files ?? [];
+            sw.WriteLine($"Content Manifest for Depot {depot.DepotId} ");
+            sw.WriteLine();
+            sw.WriteLine($"Manifest ID / date     : {depot.ManifestId} / {manifest.CreationTime} ");
 
             var uniqueChunks = new HashSet<byte[]>(new ChunkIdComparer());
 
+            foreach (var file in manifest.Files)
+            {
+                foreach (var chunk in file.Chunks)
+                {
+                    uniqueChunks.Add(chunk.ChunkID);
+                }
+            }
+
+            sw.WriteLine($"Total number of files  : {manifest.Files.Count} ");
+            sw.WriteLine($"Total number of chunks : {uniqueChunks.Count} ");
+            sw.WriteLine($"Total bytes on disk    : {manifest.TotalUncompressedSize} ");
+            sw.WriteLine($"Total bytes compressed : {manifest.TotalCompressedSize} ");
+            sw.WriteLine();
+            sw.WriteLine();
+            sw.WriteLine("          Size Chunks File SHA                                 Flags Name");
+
+            foreach (var file in manifest.Files)
+            {
+                var sha1Hash = Convert.ToHexString(file.FileHash).ToLower();
+                sw.WriteLine($"{file.TotalSize,14:d} {file.Chunks.Count,6:d} {sha1Hash} {(int)file.Flags,5:x} {file.FileName}");
+            }
+        }
+
+        private static void DumpManifestToJsonFile(DepotDownloadInfo depot, DepotManifest manifest)
+        {
+            var fileName = $"manifest_{depot.DepotId}_{depot.ManifestId}.json";
+            var filePath = Path.Combine(depot.InstallDir, CONFIG_DIR, fileName);
+            using var sw = new StreamWriter(filePath);
+
+            var manifestFiles = manifest.Files ?? [];
+            var uniqueChunks = new HashSet<byte[]>(new ChunkIdComparer());
             foreach (var file in manifestFiles)
             {
                 foreach (var chunk in file.Chunks)
@@ -1372,57 +1412,138 @@ namespace DepotDownloader
                 }
             }
 
-            if (asJson)
+            var filesArray = new JsonArray();
+            foreach (var file in manifestFiles)
             {
-                var filesArray = new JsonArray();
-                foreach (var file in manifestFiles)
+                var sha1Hash = Convert.ToHexString(file.FileHash).ToLower();
+                var fileObject = new JsonObject
                 {
-                    var sha1Hash = Convert.ToHexString(file.FileHash).ToLower();
-                    var fileObject = new JsonObject
-                    {
-                        { "size", file.TotalSize },
-                        { "chunks", file.Chunks.Count },
-                        { "sha", sha1Hash },
-                        { "flags", Convert.ToString((int) file.Flags, 16) },
-                        { "name", file.FileName }
-                    };
-                    filesArray.Add(fileObject);
-                }
-
-                var manifestObject = new JsonObject
-                {
-                    { "description", $"Content Manifest for Depot {depot.DepotId}" },
-                    { "depotId", depot.DepotId },
-                    { "manifestId", depot.ManifestId },
-                    { "manifestCreationTime", manifest.CreationTime },
-                    { "totalFiles", manifestFiles.Count },
-                    { "totalChunks", uniqueChunks.Count },
-                    { "totalBytesOnDisk", manifest.TotalUncompressedSize },
-                    { "totalBytesCompressed", manifest.TotalCompressedSize },
-                    { "files", filesArray }
+                    { "size", file.TotalSize },
+                    { "chunks", file.Chunks.Count },
+                    { "sha", sha1Hash },
+                    { "flags", Convert.ToString((int)file.Flags, 16) },
+                    { "name", file.FileName }
                 };
-                sw.WriteLine(manifestObject.ToJsonString());
+                filesArray.Add(fileObject);
             }
-            else
+
+            var jsonObject = new JsonObject
             {
-                sw.WriteLine($"Content Manifest for Depot {depot.DepotId} ");
-                sw.WriteLine();
-                sw.WriteLine($"Manifest ID / date     : {depot.ManifestId} / {manifest.CreationTime} ");
+                { "description", $"Content Manifest for Depot {depot.DepotId}" },
+                { "depotId", depot.DepotId },
+                { "manifestId", depot.ManifestId },
+                { "manifestCreationTime", manifest.CreationTime },
+                { "totalFiles", manifestFiles.Count },
+                { "totalChunks", uniqueChunks.Count },
+                { "totalBytesOnDisk", manifest.TotalUncompressedSize },
+                { "totalBytesCompressed", manifest.TotalCompressedSize },
+                { "files", filesArray }
+            };
+            sw.WriteLine(jsonObject.ToJsonString());
+            Console.WriteLine($"Wrote {fileName}");
+        }
 
-                sw.WriteLine($"Total number of files  : {manifestFiles.Count} ");
-                sw.WriteLine($"Total number of chunks : {uniqueChunks.Count} ");
-                sw.WriteLine($"Total bytes on disk    : {manifest.TotalUncompressedSize} ");
-                sw.WriteLine($"Total bytes compressed : {manifest.TotalCompressedSize} ");
-                sw.WriteLine();
-                sw.WriteLine();
-                sw.WriteLine("          Size Chunks File SHA                                 Flags Name");
+        public static async Task DumpAppInfoJsonFile(uint appId)
+        {
+            if (steam3 != null && appId != INVALID_APP_ID)
+            {
+                await steam3.RequestAppInfo(appId);
+            }
 
-                foreach (var file in manifestFiles)
+            if (steam3?.AppInfo == null)
+            {
+                return;
+            }
+
+            if (!steam3.AppInfo.TryGetValue(appId, out var appInfo) || appInfo == null)
+            {
+                return;
+            }
+
+            DumpAppInfoToJsonFile(appInfo, Config.InstallDirectory);
+        }
+
+        private static void DumpAppInfoToJsonFile(SteamApps.PICSProductInfoCallback.PICSProductInfo appInfo, string installDir)
+        {
+            var fileName = $"appinfo_{appInfo.ID}.json";
+            var filePath = Path.Combine(installDir, CONFIG_DIR, fileName);
+            using var sw = new StreamWriter(filePath);
+
+            // Will traverse the KeyValue chain and fill the parent JSON object.
+            void Traverse(KeyValue kv, JsonObject parentObj)
+            {
+                if (kv.Name != null)
                 {
-                    var sha1Hash = Convert.ToHexString(file.FileHash).ToLower();
-                    sw.WriteLine($"{file.TotalSize,14:d} {file.Chunks.Count,6:d} {sha1Hash} {(int)file.Flags,5:x} {file.FileName}");
+                    if (kv.Value == null)
+                    {
+                        var childObj = new JsonObject();
+                        foreach (var child in kv.Children)
+                        {
+                            Traverse(child, childObj);
+                        }
+
+                        parentObj[kv.Name] = childObj;
+                    }
+                    else
+                    {
+                        parentObj[kv.Name] = kv.Value;
+                    }
+                }
+                else
+                {
+                    Console.WriteLine("KeyValue.Name was null");
                 }
             }
+
+            var jsonObject = new JsonObject();
+
+            // Dynamically walk appInfo properties in case it is extended in the future.
+            foreach (var prop in appInfo.GetType().GetProperties(BindingFlags.Public | BindingFlags.Instance))
+            {
+                var name = prop.Name;
+                var value = prop.GetValue(appInfo);
+                switch (value)
+                {
+                    case int or short or long or uint or ushort or ulong: // ID, ChangeNumber
+                        jsonObject[name] = Convert.ToInt64(value);
+                        break;
+                    case float or double: // Future proofing
+                        jsonObject[name] = Convert.ToDouble(value);
+                        break;
+                    case bool boolean: // MissingToken, OnlyPublic, UseHttp
+                        jsonObject[name] = boolean;
+                        break;
+                    case string str: // Future proofing
+                        jsonObject[name] = str;
+                        break;
+                    case null: // SHAHash, HttpUri
+                        jsonObject[name] = null;
+                        break;
+                    case byte[] bytes: // SHAHash
+                        jsonObject[name] = Convert.ToHexString(bytes);
+                        break;
+                    case KeyValue keyValue: // KeyValues
+                    {
+                        var values = new JsonObject();
+                        Traverse(keyValue, values);
+                        jsonObject[name] = values;
+                        break;
+                    }
+                    case Uri uri: // HttpUri
+                        jsonObject[name] = uri.ToString();
+                        break;
+                    default:
+                        Console.WriteLine($"Warning: Unhandled property in AppInfo JSON output: {name} ({value})");
+                        break;
+                }
+            }
+
+            var options = new JsonSerializerOptions
+            {
+                WriteIndented = true // Pretty print
+            };
+            sw.WriteLine(jsonObject.ToJsonString(options));
+            Console.WriteLine($"Wrote {fileName}");
         }
     }
 }

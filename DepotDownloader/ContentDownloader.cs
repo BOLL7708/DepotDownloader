@@ -4,6 +4,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Concurrent;
+using System.Collections.Frozen;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -37,6 +38,16 @@ namespace DepotDownloader
         private const string DEFAULT_DOWNLOAD_DIR = "depots";
         private const string CONFIG_DIR = ".DepotDownloader";
         private static readonly string STAGING_DIR = Path.Combine(CONFIG_DIR, "staging");
+
+        private static readonly FrozenSet<EWorkshopFileType> SupportedWorkshopFileTypes = FrozenSet.ToFrozenSet(new[]
+        {
+            EWorkshopFileType.Community,
+            EWorkshopFileType.Art,
+            EWorkshopFileType.Screenshot,
+            EWorkshopFileType.Merch,
+            EWorkshopFileType.IntegratedGuide,
+            EWorkshopFileType.ControllerBinding,
+        });
 
         private sealed class DepotDownloadInfo(
             uint depotid, uint appId, ulong manifestId, string branch,
@@ -337,22 +348,55 @@ namespace DepotDownloader
 
             steam3.Disconnect();
         }
-
-        public static async Task DownloadPubfileAsync(uint appId, ulong publishedFileId)
+        private static async Task ProcessPublishedFileAsync(uint appId, ulong publishedFileId, List<ValueTuple<string, string>> fileUrls, List<ulong> contentFileIds)
         {
             var details = await steam3.GetPublishedFileDetails(appId, publishedFileId);
+            var fileType = (EWorkshopFileType)details.file_type;
 
-            if (!string.IsNullOrEmpty(details?.file_url))
+            if (fileType == EWorkshopFileType.Collection)
             {
-                await DownloadWebFile(appId, details.filename, details.file_url);
+                foreach (var child in details.children)
+                {
+                    await ProcessPublishedFileAsync(appId, child.publishedfileid, fileUrls, contentFileIds);
+                }
             }
-            else if (details?.hcontent_file > 0)
+            else if (SupportedWorkshopFileTypes.Contains(fileType))
             {
-                await DownloadAppAsync(appId, new List<(uint, ulong)> { (appId, details.hcontent_file) }, DEFAULT_BRANCH, null, null, null, false, true);
+                if (!string.IsNullOrEmpty(details?.file_url))
+                {
+                    fileUrls.Add((details.filename, details.file_url));
+                }
+                else if (details?.hcontent_file > 0)
+                {
+                    contentFileIds.Add(details.hcontent_file);
+                }
+                else
+                {
+                    Console.WriteLine("Unable to locate manifest ID for published file {0}", publishedFileId);
+                }
             }
             else
             {
-                Console.WriteLine("Unable to locate manifest ID for published file {0}", publishedFileId);
+                Console.WriteLine("Published file {0} has unsupported file type {1}. Skipping file", publishedFileId, fileType);
+            }
+        }
+
+        public static async Task DownloadPubfileAsync(uint appId, ulong publishedFileId)
+        {
+            List<ValueTuple<string, string>> fileUrls = new();
+            List<ulong> contentFileIds = new();
+
+            await ProcessPublishedFileAsync(appId, publishedFileId, fileUrls, contentFileIds);
+
+            foreach (var item in fileUrls)
+            {
+                await DownloadWebFile(appId, item.Item1, item.Item2);
+            }
+
+            if (contentFileIds.Count > 0)
+            {
+                var depotManifestIds = contentFileIds.Select(id => (appId, id)).ToList();
+                await DownloadAppAsync(appId, depotManifestIds, DEFAULT_BRANCH, null, null, null, false, true);
             }
         }
 
@@ -873,7 +917,7 @@ namespace DepotDownloader
 
             if (Config.WriteManifestJson)
             {
-                DumpManifestToJsonFile(depot, newManifest);
+                WriteManifestToJsonFile(depot, newManifest);
             }
 
             var stagingDir = Path.Combine(depot.InstallDir, STAGING_DIR);
@@ -1396,7 +1440,7 @@ namespace DepotDownloader
             }
         }
 
-        private static void DumpManifestToJsonFile(DepotDownloadInfo depot, DepotManifest manifest)
+        private static void WriteManifestToJsonFile(DepotDownloadInfo depot, DepotManifest manifest)
         {
             var fileName = $"manifest_{depot.DepotId}_{depot.ManifestId}.json";
             var filePath = Path.Combine(depot.InstallDir, CONFIG_DIR, fileName);
@@ -1439,7 +1483,12 @@ namespace DepotDownloader
                 { "totalBytesCompressed", manifest.TotalCompressedSize },
                 { "files", filesArray }
             };
-            sw.WriteLine(jsonObject.ToJsonString());
+
+            var options = new JsonSerializerOptions
+            {
+                WriteIndented = true // Pretty print
+            };
+            sw.WriteLine(jsonObject.ToJsonString(options));
             Console.WriteLine($"Wrote {fileName}");
         }
 
@@ -1460,10 +1509,10 @@ namespace DepotDownloader
                 return;
             }
 
-            DumpAppInfoToJsonFile(appInfo, Config.InstallDirectory);
+            WriteAppInfoToJsonFile(appInfo, Config.InstallDirectory);
         }
 
-        private static void DumpAppInfoToJsonFile(SteamApps.PICSProductInfoCallback.PICSProductInfo appInfo, string installDir)
+        private static void WriteAppInfoToJsonFile(SteamApps.PICSProductInfoCallback.PICSProductInfo appInfo, string installDir)
         {
             var fileName = $"appinfo_{appInfo.ID}.json";
             var filePath = Path.Combine(installDir, CONFIG_DIR, fileName);

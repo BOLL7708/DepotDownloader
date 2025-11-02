@@ -531,8 +531,8 @@ namespace DepotDownloader
             Console.WriteLine("  -max-downloads <#>       - maximum number of chunks to download concurrently. (default: 8).");
             Console.WriteLine("  -loginid <#>             - a unique 32-bit integer Steam LogonID in decimal, required if running multiple instances of DepotDownloader concurrently.");
             Console.WriteLine("  -use-lancache            - forces downloads over the local network via a Lancache instance.");
-            Console.WriteLine("  -appinfo-json            - writes downloaded appinfo as JSON to the target config directory.");
-            Console.WriteLine("  -manifest-json           - writes human readable manifest as JSON to the target config directory.");
+            Console.WriteLine("  -appinfo-json            - writes appinfo as JSON to the config directory.");
+            Console.WriteLine("  -manifest-json           - writes human readable manifest as JSON to the config directory.");
             Console.WriteLine();
             Console.WriteLine("  -debug                   - enable verbose debug logging.");
             Console.WriteLine("  -V or --version          - print version and runtime.");
